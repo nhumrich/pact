@@ -343,6 +343,14 @@ fn tc_method_trait_names(tname: Str, method: Str) -> Str {
     tc_method_trait_names_idx.get(tc_method_traits_key(tname, method)) ?? ""
 }
 
+// The sealed built-in List HOF surface (sections/03c_protocols.md:38,
+// sections/03_types.md:531). A user poly-impl method reusing one of these names
+// collides with the sealed method, so the name counts as one ambiguity owner.
+fn tc_is_sealed_list_hof(method: Str) -> Int {
+    if method == "fold" || method == "for_each" || method == "any" || method == "all" || method == "map" || method == "filter" { return 1 }
+    0
+}
+
 // Typecheck-side mirror of codegen's mangle_impl_method: the fnsig key for an
 // impl method. Must match the codegen C symbol exactly so arg-shape/return-type
 // lookups resolve. From/TryFrom keep `{type}_{method}_{src}`; all other traits
@@ -12048,6 +12056,27 @@ fn infer_type_uncached(node: Int) -> Int ! TypeCheck.Resolve, TypeCheck.Report, 
                 check_closure_param(cls, 0, init_t, method, "Iterator")
                 check_closure_param(cls, 1, elem, method, "Iterator")
                 return init_t
+            }
+        }
+
+        // §3c rule-3 on a List receiver: an unqualified call to a method
+        // defined by two or more owners is ambiguous. Owners are the user
+        // poly-impl traits (`impl[T] Trait for List[T]`, recorded via
+        // tc_record_method_trait under "List") plus, for a reused HOF name, the
+        // sealed built-in List surface. Placed BEFORE the builtin List block so a
+        // user method shadowing fold/map/... is caught (Gate B). Mirrors the
+        // struct/enum guard below. The qualified call `Trait.method(receiver)`
+        // parses with obj = Ident(Trait), so obj_k != List — it never enters here.
+        if obj_k == TyKind.List {
+            let user_traits = tc_method_trait_count("List", method)
+            let sealed_hof = tc_is_sealed_list_hof(method)
+            if user_traits + sealed_hof >= 2 {
+                let user_names = tc_method_trait_names("List", method)
+                let names = if sealed_hof != 0 {
+                    if user_names != "" { "{user_names} and the sealed built-in List.{method}" } else { "the sealed built-in List.{method}" }
+                } else { user_names }
+                diag_error_at("AmbiguousMethodCall", AMBIGUOUS_METHOD_CALL, "ambiguous method call: '.{method}' is defined in multiple traits implemented by List ({names})", node, "use a qualified call to disambiguate, e.g. `Trait.{method}(receiver)`")
+                return TYPE_UNKNOWN
             }
         }
 

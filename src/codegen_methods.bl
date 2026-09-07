@@ -389,13 +389,20 @@ pub fn tparam_tid_via_mono(param_name: Str, tparams_sl: Int, arg_tids: List[Int]
 }
 
 @allow(UnrestoredMutation, IncompleteStateRestore)
-fn emit_poly_impl_call(node: Int, composed_base: Str, obj_str: Str) ! Codegen.Emit, Codegen.Register, Codegen.Scope, Diag.Report {
+// `recv_node` is the AST node of the List receiver (its tid drives the element
+// monomorphization) and `args_start` is the first index into `node_args(node)`
+// that is a METHOD argument. For the unqualified call `recv.m(a, b)` the receiver
+// is node_obj and the method args are the whole arg list (args_start = 0). For
+// the qualified call `Trait.m(recv, a, b)` the receiver is arg0 and the method
+// args begin at args_start = 1; `obj_str` is the already-emitted receiver C in
+// both shapes.
+fn emit_poly_impl_call(node: Int, composed_base: Str, obj_str: Str, recv_node: Int, args_start: Int) ! Codegen.Emit, Codegen.Register, Codegen.Scope, Diag.Report {
     let im = poly_impl_block_node.get(composed_base).unwrap()
     let m_def = poly_impl_method_node.get(composed_base).unwrap()
     let tparams_sl = node_impl_binders(im)
-    let arg_tids = poly_impl_concrete_arg_tids(im, node_obj(node))
+    let arg_tids = poly_impl_concrete_arg_tids(im, recv_node)
     let concrete_args = mono_csv_from_arg_tids(arg_tids)
-    let ret_tids = poly_impl_return_elem_tids(im, node_obj(node))
+    let ret_tids = poly_impl_return_elem_tids(im, recv_node)
     let mangled = mangle_generic_name(composed_base, concrete_args)
     register_mono_fn(composed_base, concrete_args, arg_tids)
     register_mono_instance(composed_base, concrete_args, arg_tids)
@@ -440,18 +447,20 @@ fn emit_poly_impl_call(node: Int, composed_base: Str, obj_str: Str) ! Codegen.Em
     let self_offset = if impl_method_self_name(m_def) != "" { 1 } else { 0 }
     let mut args_str = obj_str
     if args_sl != -1 {
-        let mut i = 0
+        let mut i = args_start
+        let mut marg = 0
         while i < sublist_length(args_sl) {
             args_str = args_str.concat(", ")
             let saved_hint = cg_expect_fn_value_sig
-            cg_expect_fn_value_sig = arg_fn_value_hint(m_params_sl, i + self_offset)
+            cg_expect_fn_value_sig = arg_fn_value_hint(m_params_sl, marg + self_offset)
             let saved_arg_ann = cg_expect_arg_ann
-            cg_expect_arg_ann = arg_type_ann_at(m_params_sl, i + self_offset)
+            cg_expect_arg_ann = arg_type_ann_at(m_params_sl, marg + self_offset)
             emit_expr(sublist_get(args_sl, i))
             cg_expect_arg_ann = saved_arg_ann
             cg_expect_fn_value_sig = saved_hint
             args_str = args_str.concat(expr_result_str)
             i = i + 1
+            marg = marg + 1
         }
     }
 
@@ -593,7 +602,7 @@ fn emit_user_impl_call(node: Int, type_name: Str, method: Str, obj_str: Str) ! C
     // use site — registered here, emitted by the deferred mono pass — exactly
     // like a generic free fn. Routed before the single-symbol path below.
     if call_trait != "" && is_poly_impl_base(mangled) != 0 {
-        emit_poly_impl_call(node, mangled, obj_str)
+        emit_poly_impl_call(node, mangled, obj_str, node_obj(node), 0)
         return
     }
     let args_sl = node_args(node)
@@ -3918,6 +3927,17 @@ pub fn emit_method_call(node: Int) ! Codegen.Emit, Codegen.Register, Codegen.Sco
                     // resolve the real owner so the symbol matches the definition.
                     let bi_owner_trait = if impl_type_implements_trait_method(bi_recv_name, trait_name, method) != 0 { trait_name } else { impl_trait_for_method(bi_recv_name, method) }
                     let mangled = if bi_owner_trait != "" { mangle_impl_method_q(bi_recv_name, bi_owner_trait, method) } else { "{bi_recv_name}_{method}" }
+                    // A per-T poly-impl method (`impl[T] Trait[T] for List[T]` whose
+                    // body/signature uses the element T) is monomorphized per concrete
+                    // element, exactly as the unqualified `recv.m()` path routes through
+                    // emit_poly_impl_call. The receiver is arg0 (already emitted into
+                    // first_str) and the method args start at index 1. Element-agnostic
+                    // impls are not poly-impl bases and fall through to the single-symbol
+                    // emit below unchanged.
+                    if bi_owner_trait != "" && is_poly_impl_base(mangled) != 0 {
+                        emit_poly_impl_call(node, mangled, first_str, sublist_get(args_sl, 0), 1)
+                        return
+                    }
                     let mut args_str = first_str
                     let mut bi_i = 1
                     while bi_i < sublist_length(args_sl) {

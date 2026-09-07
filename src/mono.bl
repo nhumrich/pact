@@ -83,10 +83,12 @@ let mut mono_type_def_by_name: Map[Str, Int] = Map()
 
 // Shadow poly-impl registry, mirroring codegen's poly_impl_block_node /
 // poly_impl_method_node (which are generate-time and empty at this point in the
-// pipeline). Keyed by the composed base `List_<Trait>_<method>`. The reverse
-// method-name -> composed index dispatches a method CALL to its composed base;
-// method-name collisions are cross-FILE only (never two poly-impl methods of the
-// same name in one program), so the reverse index is unambiguous per program.
+// pipeline). Keyed by the collision-free composed base `List_<Trait>_<method>`.
+// A QUALIFIED call `Trait.method(recv)` resolves straight through this composed
+// key. The bare method-name -> composed reverse index below serves only the
+// UNQUALIFIED call `recv.method(...)`; a same-named poly-impl method on List is
+// rejected at the call site (E0522), so per program that reverse index
+// has a single owner per method name.
 let mut mono_poly_block_by_composed: Map[Str, Int] = Map()
 let mut mono_poly_method_by_composed: Map[Str, Int] = Map()
 let mut mono_poly_composed_by_method: Map[Str, Str] = Map()
@@ -390,22 +392,51 @@ fn handle_method_call(node: Int) {
 fn handle_poly_impl_call(node: Int) {
     let obj = node_obj(node)
     if obj == -1 { return }
-    // A module-qualified free-fn call is the other MethodCall shape; leave it to
-    // handle_method_call.
-    if node_kind(obj) == NodeKind.Ident && is_import_module_name(node_name(obj)) != 0 { return }
-    match mono_poly_composed_by_method.get(node_method(node)) {
-        Some(composed) => {
-            let m_def = mono_poly_method_by_composed.get(composed).unwrap()
-            let im = mono_poly_block_by_composed.get(composed).unwrap()
-            let recv_raw = tc_lookup_node_tid(obj)
-            if recv_raw < 0 { return }
-            let recv_tid = substitute_typevar_tid(tc_tid_resolved(recv_raw), mono_ctx_binds)
-            let elem_tid = tc_tid_list_elem(recv_tid)
-            if elem_tid < 0 { return }
-            enqueue_full(m_def, node_impl_binders(im), composed, [elem_tid])
+    let method = node_method(node)
+    // Qualified call `Trait.method(receiver, ...)`: obj is the trait Ident and the
+    // receiver is arg0. Resolve straight to the trait's own composed base through
+    // the collision-free composed key, bypassing the last-write-wins reverse index
+    // so two same-named poly-impl methods (e.g. Sizer/Counter both `.measure` on
+    // List) each enqueue their own symbol. Mirrors codegen's qualified resolution
+    // (codegen_methods.bl impl_type_implements_trait_method -> mangle_impl_method_q)
+    // using the shadow's own registry (codegen's are empty at mono time).
+    if node_kind(obj) == NodeKind.Ident {
+        let composed_q = mangle_impl_method_q("List", node_name(obj), method)
+        match mono_poly_method_by_composed.get(composed_q) {
+            Some(_m) => {
+                let args_sl = node_args(node)
+                if args_sl != -1 && sublist_length(args_sl) >= 1 {
+                    enqueue_poly_impl_composed(composed_q, sublist_get(args_sl, 0))
+                }
+                return
+            }
+            None => {}
         }
+        // A module-qualified free-fn call is the other Ident-obj MethodCall shape;
+        // leave it to handle_method_call.
+        if is_import_module_name(node_name(obj)) != 0 { return }
+    }
+    // Unqualified call `receiver.method(...)`: resolve by bare method name via the
+    // reverse index (single-owner per program after the call-site E0522).
+    match mono_poly_composed_by_method.get(method) {
+        Some(composed) => { enqueue_poly_impl_composed(composed, obj) }
         None => {}
     }
+}
+
+// Enqueue the poly-impl method registered under `composed` for the List receiver
+// `recv_node`, monomorphized on the receiver's element type. A method registered
+// here but called on a non-List receiver has no element tid, so tc_tid_list_elem
+// returns -1 and the call is skipped.
+fn enqueue_poly_impl_composed(composed: Str, recv_node: Int) {
+    let m_def = mono_poly_method_by_composed.get(composed).unwrap()
+    let im = mono_poly_block_by_composed.get(composed).unwrap()
+    let recv_raw = tc_lookup_node_tid(recv_node)
+    if recv_raw < 0 { return }
+    let recv_tid = substitute_typevar_tid(tc_tid_resolved(recv_raw), mono_ctx_binds)
+    let elem_tid = tc_tid_list_elem(recv_tid)
+    if elem_tid < 0 { return }
+    enqueue_full(m_def, node_impl_binders(im), composed, [elem_tid])
 }
 
 // A List builtin HOF method (`.fold`/`.for_each`/`.any`/`.all`) that codegen

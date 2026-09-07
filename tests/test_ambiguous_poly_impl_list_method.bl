@@ -1,0 +1,56 @@
+// §3c rule-3 AmbiguousMethodCall (E0522) on a List[T] receiver.
+//
+// An unqualified `xs.m()` that resolves to a method `m` defined by two or more
+// traits List[T] implements is ambiguous, exactly as on a struct/enum receiver.
+// This was excluded from the List arm when E0522 first landed, so it silently
+// fell through to TYPE_UNKNOWN and crashed at cc. The sealed built-in List HOF
+// surface (fold/for_each/any/all/map/filter) counts as one owner, so a user
+// poly-impl method that reuses one of those names is also ambiguous.
+// The escape hatch is the qualified call `Trait.m(receiver)` (see
+// test_qualified_poly_impl_list_dispatch.bl).
+
+import compile_test_helpers
+
+// NEG: two user traits define the same NON-HOF method on List → unqualified call
+// is ambiguous.
+test "two traits with same List method makes unqualified call ambiguous" {
+    let src = "trait Sizer \{ fn measure(self) -> Int }\n"
+              .concat("trait Counter \{ fn measure(self) -> Int }\n")
+              .concat("impl[T] Sizer for List[T] \{ fn measure(_self) -> Int \{ 111 } }\n")
+              .concat("impl[T] Counter for List[T] \{ fn measure(_self) -> Int \{ 222 } }\n")
+              .concat("fn main() \{\n")
+              .concat("    let xs: List[Int] = [1, 2, 3]\n")
+              .concat("    let n = xs.measure()\n")
+              .concat("    io.println(\"\{n}\")\n")
+              .concat("}\n")
+    compile_test_helpers.expect_compile_error(src, "ambig_list_method_two_traits", "E0522")
+}
+
+// NEG (Gate B): a user poly-impl List method that reuses a sealed built-in HOF
+// name (fold) collides with the sealed surface → unqualified call is ambiguous.
+test "user List method shadowing sealed HOF fold is ambiguous" {
+    let src = "trait Folder \{ fn fold(self) -> Int }\n"
+              .concat("impl[T] Folder for List[T] \{ fn fold(_self) -> Int \{ 99 } }\n")
+              .concat("fn main() \{\n")
+              .concat("    let xs: List[Int] = [1, 2, 3]\n")
+              .concat("    let n = xs.fold()\n")
+              .concat("    io.println(\"\{n}\")\n")
+              .concat("}\n")
+    compile_test_helpers.expect_compile_error(src, "ambig_list_method_hof_shadow", "E0522")
+}
+
+// POS control: a single user trait defining `measure` on List → NOT ambiguous,
+// the unqualified call resolves and runs (no over-rejection).
+test "single trait List method resolves without ambiguity" {
+    let src = "trait Sizer \{ fn measure(self) -> Int }\n"
+              .concat("impl[T] Sizer for List[T] \{ fn measure(_self) -> Int \{ 111 } }\n")
+              .concat("fn main() \{\n")
+              .concat("    let xs: List[Int] = [1, 2, 3]\n")
+              .concat("    let n = xs.measure()\n")
+              .concat("    io.println(\"\{n}\")\n")
+              .concat("}\n")
+    compile_test_helpers.expect_no_error(src, "ambig_list_method_single_ok", "E0522")
+    let r = compile_test_helpers.compile_and_run(src, "ambig_list_method_single_run")
+    assert_eq(r.exit_code, 0)
+    assert(r.out.contains("111"))
+}

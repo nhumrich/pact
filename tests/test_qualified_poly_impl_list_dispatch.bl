@@ -1,0 +1,57 @@
+// Two traits both `impl[T] Trait[T] for List[T]` with a same-named,
+// element-USING (per-T monomorphized) method, dispatched via the QUALIFIED call
+// `Trait.method(receiver, ...)`.
+//
+// This is legal (coherence is per-(Trait, Type); two distinct traits on List[T]
+// is permitted, and qualification is the disambiguator — sections/03c_protocols.md
+// rule 3). It is also the escape hatch E0522 directs users to (see
+// test_ambiguous_poly_impl_list_method.bl), so it must work end to end.
+//
+// The `tag(self, x: T)` methods reference the element type T, so each is
+// monomorphized per concrete element — codegen must emit
+// `blink_List_Sizer_tag_<elem>` and `blink_List_Counter_tag_<elem>` as distinct
+// symbols and dispatch each qualified call to its own. This also locks that the
+// monomorphization shadow worklist enqueues BOTH composed bases rather than
+// collapsing them under the bare method name (its reverse index is
+// last-write-wins).
+
+import compile_test_helpers
+
+fn two_trait_src() -> Str {
+    "trait Sizer[T]   \{ fn tag(self, x: T) -> Int }\n"
+        .concat("trait Counter[T] \{ fn tag(self, x: T) -> Int }\n")
+        .concat("impl[T] Sizer[T]   for List[T] \{ fn tag(_self, _x: T) -> Int \{ 111 } }\n")
+        .concat("impl[T] Counter[T] for List[T] \{ fn tag(_self, _x: T) -> Int \{ 222 } }\n")
+        .concat("fn main() \{\n")
+        .concat("    let xs: List[Int] = [1, 2, 3]\n")
+        .concat("    let a = Sizer.tag(xs, 0)\n")
+        .concat("    let b = Counter.tag(xs, 0)\n")
+        .concat("    io.println(\"\{a} \{b}\")\n")
+        .concat("}\n")
+}
+
+test "qualified calls to two same-named per-T List trait methods each dispatch correctly" {
+    let r = compile_test_helpers.compile_and_run(two_trait_src(), "qualified_poly_impl_two_trait_run")
+    assert_eq(r.exit_code, 0)
+    assert(r.out.contains("111 222"))
+}
+
+test "both per-T trait method instances are emitted as distinct monomorphized symbols" {
+    let c = compile_test_helpers.compile_and_emit_c(two_trait_src(), "qualified_poly_impl_two_trait_emit")
+    assert(compile_test_helpers.has_poly_impl_fn_instance(c, "List_Sizer_tag") == 1)
+    assert(compile_test_helpers.has_poly_impl_fn_instance(c, "List_Counter_tag") == 1)
+}
+
+// A SINGLE trait, per-T, called via the qualified form — the plainest shape the
+// escape hatch produces. Must monomorphize and run (no ambiguity involved).
+test "single-trait qualified per-T List call monomorphizes and runs" {
+    let src = "trait Sizer[T] \{ fn tag(self, x: T) -> Int }\n"
+              .concat("impl[T] Sizer[T] for List[T] \{ fn tag(_self, _x: T) -> Int \{ 111 } }\n")
+              .concat("fn main() \{\n")
+              .concat("    let xs: List[Int] = [1, 2, 3]\n")
+              .concat("    io.println(\"\{Sizer.tag(xs, 0)}\")\n")
+              .concat("}\n")
+    let r = compile_test_helpers.compile_and_run(src, "qualified_poly_impl_single_run")
+    assert_eq(r.exit_code, 0)
+    assert(r.out.contains("111"))
+}
