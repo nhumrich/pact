@@ -138,6 +138,13 @@ pub let mut ty_param_list: List[Int] = []
 // init_types alongside ty_pool so a tid can never outlive its pool.
 let mut tc_node_tid: List[Int] = []
 
+// MethodCall node id → 1 when its obj Ident is a live VALUE binding (a local
+// shadowing a trait/module name), so codegen/mono treat it as an instance call,
+// not a qualified trait call. Captured during infer_type while scope is live;
+// resident through generate(). Monotonic (only ever set to 1) so a later
+// re-inference with scope torn down cannot un-mark it.
+let mut tc_mc_obj_is_value: List[Int] = []
+
 // Call node → the metavars minted for that call's RETURN-ONLY type params.
 // Presized to node_count() with -1 in init_types, exactly like tc_node_tid, so a
 // stale index can never survive a pool reset.
@@ -7201,10 +7208,12 @@ fn init_types() ! TypeCheck.Register {
     ty_intern.clear()
     tc_node_tid.clear()
     tc_ret_mint_start.clear()
+    tc_mc_obj_is_value.clear()
     let mut nti = 0
     while nti < node_count() {
         tc_node_tid.push(-1)
         tc_ret_mint_start.push(-1)
+        tc_mc_obj_is_value.push(0)
         nti = nti + 1
     }
     tc_ret_mint_tids.clear()
@@ -11260,6 +11269,12 @@ pub fn tc_lookup_node_tid(node: Int) -> Int {
     tc_node_tid.get(node).unwrap()
 }
 
+pub fn tc_mc_obj_is_value(node: Int) -> Int {
+    if node == -1 { return 0 }
+    if node >= tc_mc_obj_is_value.len() { return 0 }
+    tc_mc_obj_is_value.get(node).unwrap()
+}
+
 // Publish a tid for a node that is a DECLARATION rather than an expression, so codegen can read
 // it from the same memo it reads every inferred type from.
 //
@@ -11774,6 +11789,15 @@ fn infer_type_uncached(node: Int) -> Int ! TypeCheck.Resolve, TypeCheck.Report, 
     if kind == NodeKind.MethodCall {
         let obj_node = node_obj(node)
         let method = node_method(node)
+
+        // A local value shadowing a trait/module name makes `obj.method(args)` an
+        // instance call, not a qualified trait call (§03c:590, §10.1:1164). Capture
+        // it here while scope is live so codegen/mono can route it correctly after
+        // nr scope is torn down. Monotonic, so a later scope-torn-down re-inference
+        // never un-marks it.
+        if obj_node != -1 && node_kind(obj_node) == NodeKind.Ident && nr_has_binding(node_name(obj_node)) != 0 {
+            tc_mc_obj_is_value.set(node, 1)
+        }
 
         // `async.spawn(f)` is Handle[T] for f's return type T. It parses as an
         // ordinary MethodCall on the `async` module — NodeKind.AsyncSpawn has no producer

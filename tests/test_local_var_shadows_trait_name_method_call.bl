@@ -1,0 +1,10 @@
+trait Sizer[T] { fn tag(self, x: T) -> Int }
+impl[T] Sizer[T] for List[T] { fn tag(self, _x: T) -> Int { self.len() } }
+
+test "local var shadowing a trait name dispatches as an instance method" {
+    let Sizer: List[List[Int]] = [[1,2],[3,4],[5,6]]
+    let inner: List[Int] = [9, 9]
+    assert_eq(Sizer.tag(inner), 3)
+    let s = "{Sizer.tag(inner)}"
+    assert_eq(s, "3")
+}

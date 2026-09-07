@@ -8,7 +8,7 @@ import parser.{
     node_methods, node_trait_name, node_impl_binders, node_recv_type_args,
 }
 import typecheck.{
-    make_tuple_type, tc_lookup_node_tid, tc_mono_binds_map, substitute_typevar_tid,
+    make_tuple_type, tc_lookup_node_tid, tc_mc_obj_is_value, tc_mono_binds_map, substitute_typevar_tid,
     tc_tid_resolved, tc_tid_struct, tc_tid_struct_arg_count, tc_tid_struct_arg_tid,
     tc_tid_child, tc_tid_child_count, is_import_module_name, tc_tid_list_elem,
 }
@@ -400,7 +400,7 @@ fn handle_poly_impl_call(node: Int) {
     // List) each enqueue their own symbol. Mirrors codegen's qualified resolution
     // (codegen_methods.bl impl_type_implements_trait_method -> mangle_impl_method_q)
     // using the shadow's own registry (codegen's are empty at mono time).
-    if node_kind(obj) == NodeKind.Ident {
+    if node_kind(obj) == NodeKind.Ident && tc_mc_obj_is_value(node) == 0 {
         let composed_q = mangle_impl_method_q("List", node_name(obj), method)
         match mono_poly_method_by_composed.get(composed_q) {
             Some(_m) => {
