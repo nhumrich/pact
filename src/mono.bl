@@ -94,13 +94,11 @@ let mut mono_poly_method_by_composed: Map[Str, Int] = Map()
 let mut mono_poly_composed_by_method: Map[Str, Str] = Map()
 
 pub fn run_mono_shadow(program: Int) {
-    // Gate: off unless BLINK_MONO_SHADOW is set. Read once, like BLINK_TRACE_CHANNELS.
-    // BLINK_MONO_DIFF also trips the gate: the diff harness reads mono_worklist, so
-    // the shadow must be populated whenever the diff runs, even if SHADOW is unset.
-    let gate = env.var("BLINK_MONO_SHADOW") ?? ""
-    let diff_gate = env.var("BLINK_MONO_DIFF") ?? ""
-    if gate == "" && diff_gate == "" { return }
-
+    // Runs UNCONDITIONALLY (Phase 2.5 Stage 1): codegen reads mono_node_tid through
+    // node_tid_for_key on every compile, so the table must be populated on every compile,
+    // not just under BLINK_MONO_SHADOW/BLINK_MONO_DIFF. run_mono_diff stays self-gated on
+    // BLINK_MONO_DIFF. This is the "twin machinery" Stage 2 deletes once the
+    // live cg_mono_*/cg_fn_mono_* recompute is gone.
     mono_worklist = []
     mono_seen = Map()
     mono_ctx_tparams_sl = -1
@@ -209,7 +207,15 @@ pub fn run_mono_diff() -> Int {
 // with cg_mono_tparams_sl / cg_mono_arg_tids holding this instance's context, so 2.5 can
 // read the table in place of recomputing. SHADOW ONLY.
 pub fn node_tid_for(inst: MonoShadowInstance, node: Int) -> Int {
-    match mono_node_tid.get("{inst.base_decl_node}\t{inst.inst_tid}\t{node}") {
+    node_tid_for_key(inst.base_decl_node, inst.inst_tid, node)
+}
+
+// The two-Int-key entry point codegen reads directly (Phase 2.5 Stage 1): codegen holds
+// the current instance's (base_decl_node, inst_tid) as swappable globals, not a
+// MonoShadowInstance, so it looks the node's substituted tid up by key. -1 when the walk
+// left no entry — the caller MUST fall back to the live formula on -1, never trust it.
+pub fn node_tid_for_key(base: Int, inst_tid: Int, node: Int) -> Int {
+    match mono_node_tid.get("{base}\t{inst_tid}\t{node}") {
         Some(tid) => tid
         None => -1
     }

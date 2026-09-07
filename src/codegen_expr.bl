@@ -11,6 +11,7 @@ import codegen_types.{
     cg_current_fn_has_ev, cg_current_fn_name, cg_current_fn_node, cg_current_fn_option_inner, cg_current_fn_option_inner_struct, cg_current_fn_ret, cg_in_test_body, cg_test_mode, cg_in_assert_panics,
     cg_let_target_ann, cg_expect_arg_ann, cg_expect_arg_tid, cg_assign_target_name, cg_fa_receiver_ctx,
     cg_mono_tparams_sl, cg_mono_arg_tids, cg_fn_mono_tparams_sl, cg_fn_mono_arg_tids,
+    cg_cur_mono_base, cg_cur_mono_inst_tid,
     cg_debug_mode, cg_handler_body_field, cg_handler_body_idx,
     cg_handler_body_is_ue, cg_handler_body_vtable_type,
     cg_handler_caps, HandlerCapture, handler_cap_c_type, cg_handler_ret_option_erased,
@@ -100,6 +101,7 @@ import diagnostics.{
 }
 import std.path.{path_dirname}
 import formatter.{format_expr}
+import mono.{node_tid_for_key}
 import typecheck.{tc_tid_subst_mono, is_import_module_name, tc_lookup_node_tid, tc_tid_child, tc_tid_name, tc_tid_list_elem, tc_tid_resolved, tc_tid_struct, tc_tid_is_enum, tc_tid_struct_arg_count, tc_tid_struct_arg_tid, tc_resolve_transparent_alias_name, tc_variant_field_is_selfrec_tuple, tc_tid_kind, TyKind}
 import lowering.{ctype_probe_at, c_type_from_tid, tc_scalar_tid_for_ct, tc_mono_tids_subst, tc_seg_from_tid, tc_tid_set_elem_ct, tc_tid_set_elem_struct, tc_tid_set_elem_ct_resolved, tc_tid_set_elem_struct_resolved, tc_tid_list_elem_ct, tc_tid_list_elem_struct, tc_tid_list_elem_struct_mono, tc_tid_map_key_ct, tc_tid_map_key_struct, tc_tid_map_key_ct_resolved, tc_tid_map_key_struct_resolved, tc_tid_map_val_ct, tc_tid_map_val_struct, tc_tid_map_val_ct_resolved, tc_tid_map_val_struct_resolved, tc_tid_map_val_tid, tc_tid_map_key_tid, tc_tid_struct_slot_seg, tc_tid_ct, tc_tid_option_inner_ct, tc_tid_option_inner_struct, tc_tid_result_ok_ct, tc_tid_result_ok_struct, tc_tid_result_err_ct, tc_tid_result_err_struct, tc_tid_to_c_tag, tc_tid_struct_mono_name, tc_struct_slot_encodable, tc_tid_inner_tag, tc_tid_option_inner_tid, tc_tid_result_ok_tid, tc_tid_result_err_tid, tc_tid_tuple_elem_faithful, tc_tid_tuple_sname, tc_tid_tuple_arity, tc_tid_tuple_elem_tid, tc_tid_kops_slot_unsolved}
 
@@ -572,7 +574,10 @@ fn cg_expr_mono_tid(raw: Int) -> Int {
     tc_tid_subst_mono(tc_tid_resolved(raw), cg_mono_tparams_sl, cg_mono_arg_tids)
 }
 fn cg_expr_node_mono_tid(node: Int) -> Int {
-    cg_expr_mono_tid(tc_lookup_node_tid(node))
+    // Twin of cg_node_mono_tid: read the mono pass's recorded tid, falling back to the
+    // live formula on a miss (byte-identical). See cg_cur_mono_base's declaration.
+    let t = node_tid_for_key(cg_cur_mono_base, cg_cur_mono_inst_tid, node)
+    if t >= 0 { t } else { cg_expr_mono_tid(tc_lookup_node_tid(node)) }
 }
 
 // Publish expr_result_tid to agree with the flat expr_result_type just assigned. A scalar CT maps
@@ -7694,6 +7699,15 @@ fn emit_struct_lit(node: Int) ! Codegen.Emit, Codegen.Register, Codegen.Scope, D
     // unconditional clear.
     let saved_mono_arg_tids = cg_mono_arg_tids
     cg_mono_arg_tids = []
+    // The shadow (run_mono_shadow) records struct-lit field nodes under the ENCLOSING FN,
+    // never the inner struct, while the field loop below repoints cg_mono_* to the inner
+    // struct's binds. Repoint the node-tid key to a guaranteed miss (-1) for the loop so
+    // cg_node_mono_tid falls back to that swapped live formula — the binds these field
+    // ctors must resolve against — instead of hitting the stale fn-context record.
+    let saved_cur_mono_base = cg_cur_mono_base
+    let saved_cur_mono_inst_tid = cg_cur_mono_inst_tid
+    cg_cur_mono_base = -1
+    cg_cur_mono_inst_tid = -1
     // Which spelling of this instance's args the field loop resolves against. The
     // string target args when they exist; otherwise the tid-native namer.
     // struct_concrete_args_from_target bails on EVERY compound annotation arg by
@@ -7935,6 +7949,8 @@ fn emit_struct_lit(node: Int) ! Codegen.Emit, Codegen.Register, Codegen.Scope, D
     }
     cg_mono_tparams_sl = saved_mono_tparams
     cg_mono_arg_tids = saved_mono_arg_tids
+    cg_cur_mono_base = saved_cur_mono_base
+    cg_cur_mono_inst_tid = saved_cur_mono_inst_tid
     // The declared let-target args are authoritative when present (they name the
     // instantiation directly); field-VALUE inference is the fallback for an
     // unannotated `let b = GKV { .. }`. Preferring target_args also lets an empty

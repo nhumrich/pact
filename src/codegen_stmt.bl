@@ -20,6 +20,7 @@ import codegen_types.{
     cg_handler_vtable_field, cg_handler_vtable_type,
     cg_in_handler_body, cg_in_ffi_scope_resource, cg_indent, cg_test_mode, cg_in_assert_panics, cg_assert_panics_counter, cg_let_target_ann, cg_expect_arg_ann,
     cg_mono_tparams_sl, cg_mono_arg_tids, cg_fn_mono_tparams_sl, cg_fn_mono_arg_tids,
+    cg_cur_mono_base, cg_cur_mono_inst_tid, cg_cur_fn_mono_tparams_sl, cg_cur_fn_mono_arg_tids,
     cg_let_target_name, cg_let_target_type, cg_assign_target_name, cg_lines, cg_program_node,
     cg_temp_counter, cg_trace_codegen, cg_ensures_result_var, cg_old_snapshot_vars,
     compound_name_from_ann, compound_name_from_ann_ctx, resolve_result_inner_tag,
@@ -117,10 +118,11 @@ import diagnostics.{
     MISSING_CANONICAL_HEADER, UNSOLVED_TYPEVAR_AT_CODEGEN, diag_is_ice_seg,
     UNHANDLED_ITERABLE_AT_CODEGEN,
 }
+import mono.{node_tid_for_key}
 import pkg.manifest.{manifest_header_is_declared, manifest_name}
 import compiler.{trace}
 import stdlib_native_deps.{stdlib_native_dep_name_by_ffi_symbol}
-import typecheck.{tc_void_tid, tc_tid_child, tc_tid_handler_effect, tc_tid_subst_mono, tc_tid_kind, tc_tid_resolved, tc_tid_iter_elem, make_list_type, TyKind, is_builtin_fn, is_import_module_name, tc_lookup_node_tid, tc_tid_struct, tc_tid_is_enum, tc_tid_struct_arg_count, tc_tid_struct_arg_tid, tc_variant_field_tid_by_name, tc_variant_field_is_selfrec_tuple}
+import typecheck.{tc_void_tid, tc_tid_child, tc_tid_handler_effect, tc_tid_subst_mono, tc_tid_kind, tc_tid_resolved, tc_tid_iter_elem, make_list_type, make_tuple_type, TyKind, is_builtin_fn, is_import_module_name, tc_lookup_node_tid, tc_tid_struct, tc_tid_is_enum, tc_tid_struct_arg_count, tc_tid_struct_arg_tid, tc_variant_field_tid_by_name, tc_variant_field_is_selfrec_tuple}
 import lowering.{tc_top_level_let_tid, ctype_probe_at, closure_sig_from_tid, enum_instance_c_from_tid, struct_instance_c_from_tid, c_type_from_tid, tc_channel_elem_ct, tc_channel_elem_struct, tc_tid_struct_mono_name, tc_tid_struct_slot_seg, tc_struct_slot_encodable, tc_tid_result_ok_tid, tc_tid_result_err_tid, tc_tid_option_inner_tid, tc_tid_ct, tc_tid_option_inner_ct, tc_tid_option_inner_struct, tc_tid_result_ok_ct, tc_tid_result_ok_struct, tc_tid_result_err_ct, tc_tid_result_err_struct, tc_tid_tuple_arity, tc_tid_tuple_elem_tid, tc_tid_tuple_sname, tc_tid_to_c_tag}
 
 fn strip_outer_parens(s: Str) -> Str {
@@ -2461,7 +2463,14 @@ fn pat_binder_tid(pat: Int) -> Int {
 // substituted for the enclosing mono instance. Kept as one definition so a second reader cannot
 // arrive at a differently-resolved tid for the same node.
 pub fn cg_node_mono_tid(n: Int) -> Int {
-    tc_tid_subst_mono(tc_tid_resolved(tc_lookup_node_tid(n)), cg_mono_tparams_sl, cg_mono_arg_tids)
+    // Phase 2.5 Stage 1: read the mono pass's recorded substituted tid for this node under
+    // the current instance context. -1 means the walk left no entry (a node it never tided,
+    // or one inside a struct-lit field loop whose context is deliberately repointed to a
+    // miss) — fall back to the live formula, which is byte-identical to what the walk records.
+    let t = node_tid_for_key(cg_cur_mono_base, cg_cur_mono_inst_tid, n)
+    if t >= 0 { t } else {
+        tc_tid_subst_mono(tc_tid_resolved(tc_lookup_node_tid(n)), cg_mono_tparams_sl, cg_mono_arg_tids)
+    }
 }
 
 // The mono-bound return tid of a function signature. An un-annotated signature returns
@@ -9985,15 +9994,27 @@ fn emit_mono_fn_def(fn_node: Int, concrete_args: Str, arg_tids: List[Int]) ! Cod
     let saved_mono_arg_tids = cg_mono_arg_tids
     let saved_fn_mono_tparams = cg_fn_mono_tparams_sl
     let saved_fn_mono_arg_tids = cg_fn_mono_arg_tids
+    let saved_cur_mono_base = cg_cur_mono_base
+    let saved_cur_mono_inst_tid = cg_cur_mono_inst_tid
+    let saved_cur_fn_mono_tparams = cg_cur_fn_mono_tparams_sl
+    let saved_cur_fn_mono_arg_tids = cg_cur_fn_mono_arg_tids
     cg_mono_tparams_sl = tparams_sl
     cg_mono_arg_tids = arg_tids
     cg_fn_mono_tparams_sl = tparams_sl
     cg_fn_mono_arg_tids = arg_tids
+    cg_cur_mono_base = fn_node
+    cg_cur_mono_inst_tid = make_tuple_type(arg_tids)
+    cg_cur_fn_mono_tparams_sl = tparams_sl
+    cg_cur_fn_mono_arg_tids = arg_tids
     emit_fn_body(node_body(fn_node), body_ret)
     cg_mono_tparams_sl = saved_mono_tparams
     cg_mono_arg_tids = saved_mono_arg_tids
     cg_fn_mono_tparams_sl = saved_fn_mono_tparams
     cg_fn_mono_arg_tids = saved_fn_mono_arg_tids
+    cg_cur_mono_base = saved_cur_mono_base
+    cg_cur_mono_inst_tid = saved_cur_mono_inst_tid
+    cg_cur_fn_mono_tparams_sl = saved_cur_fn_mono_tparams
+    cg_cur_fn_mono_arg_tids = saved_cur_fn_mono_arg_tids
     if ret_type == CT_VOID && body_ret == CT_VOID {
         emit_trace_exit_void()
     }
@@ -10347,15 +10368,27 @@ fn emit_poly_impl_method_def(im: Int, method_node: Int, concrete_args: Str, arg_
     let saved_mono_arg_tids = cg_mono_arg_tids
     let saved_fn_mono_tparams = cg_fn_mono_tparams_sl
     let saved_fn_mono_arg_tids = cg_fn_mono_arg_tids
+    let saved_cur_mono_base = cg_cur_mono_base
+    let saved_cur_mono_inst_tid = cg_cur_mono_inst_tid
+    let saved_cur_fn_mono_tparams = cg_cur_fn_mono_tparams_sl
+    let saved_cur_fn_mono_arg_tids = cg_cur_fn_mono_arg_tids
     cg_mono_tparams_sl = tparams_sl
     cg_mono_arg_tids = arg_tids
     cg_fn_mono_tparams_sl = tparams_sl
     cg_fn_mono_arg_tids = arg_tids
+    cg_cur_mono_base = method_node
+    cg_cur_mono_inst_tid = make_tuple_type(arg_tids)
+    cg_cur_fn_mono_tparams_sl = tparams_sl
+    cg_cur_fn_mono_arg_tids = arg_tids
     emit_fn_body(node_body(method_node), body_ret)
     cg_mono_tparams_sl = saved_mono_tparams
     cg_mono_arg_tids = saved_mono_arg_tids
     cg_fn_mono_tparams_sl = saved_fn_mono_tparams
     cg_fn_mono_arg_tids = saved_fn_mono_arg_tids
+    cg_cur_mono_base = saved_cur_mono_base
+    cg_cur_mono_inst_tid = saved_cur_mono_inst_tid
+    cg_cur_fn_mono_tparams_sl = saved_cur_fn_mono_tparams
+    cg_cur_fn_mono_arg_tids = saved_cur_fn_mono_arg_tids
     if ret_type == CT_VOID && body_ret == CT_VOID {
         emit_trace_exit_void()
     }

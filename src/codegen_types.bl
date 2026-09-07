@@ -1569,6 +1569,29 @@ pub let mut cg_mono_arg_tids: List[Int] = []
 pub let mut cg_fn_mono_tparams_sl: Int = -1
 pub let mut cg_fn_mono_arg_tids: List[Int] = []
 
+// Phase 2.5 Stage 1 authority-switch context. The mono pass (run_mono_shadow) records
+// every body node's substituted tid in mono_node_tid, keyed by the enclosing instance's
+// (base_decl_node, inst_tid) plus the node. Codegen holds that key here so cg_node_mono_tid
+// reads the recorded tid via node_tid_for_key instead of recomputing it from the flat
+// cg_mono_* channel.
+//
+// SWAPPABLE, twinning cg_mono_*: emit_struct_lit transiently repoints it for a struct
+// literal's own field loop. The shadow records field nodes under the ENCLOSING FN, never
+// the inner struct, so the field-loop repoint sets a guaranteed-miss key (-1) and the
+// read falls back to the swapped live formula — the context those field ctors must resolve
+// against — keeping the seam byte-parity through the swap.
+pub let mut cg_cur_mono_base: Int = -1
+pub let mut cg_cur_mono_inst_tid: Int = -1
+
+// PINNED fn-context binders, twinning cg_fn_mono_*: set once per monomorphized body and
+// never swapped by emit_struct_lit. cg_bind_mono_tid is tid-keyed (its input is a raw
+// declared ScopeVar.ty / CaptureEntry.tid, not a node), so it cannot read node_tid_for_key;
+// it substitutes against these threaded binders instead of the standalone cg_fn_mono_*
+// globals, so Stage 2 can delete that twin. Behaviorally identical today — set to
+// the same (tparams_sl, arg_tids) at the same emit sites.
+pub let mut cg_cur_fn_mono_tparams_sl: Int = -1
+pub let mut cg_cur_fn_mono_arg_tids: List[Int] = []
+
 pub let mut ffi_alloc_n_pending: Int = 0
 pub let mut ffi_offset_pending_struct: Str = ""
 
@@ -4654,7 +4677,7 @@ pub fn set_set_elem_type(name: Str, elem_type: Int) {
 // Following the binding at this one chokepoint spells the real carrier inner from
 // the tid rather than ceding to the flat channel.
 pub fn cg_bind_mono_tid(ty: Int) -> Int {
-    tc_tid_subst_mono(tc_tid_resolved(ty), cg_fn_mono_tparams_sl, cg_fn_mono_arg_tids)
+    tc_tid_subst_mono(tc_tid_resolved(ty), cg_cur_fn_mono_tparams_sl, cg_cur_fn_mono_arg_tids)
 }
 
 // -1 means "no element recorded" — callers must treat that as unknown (loud diagnostic
